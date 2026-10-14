@@ -11,7 +11,7 @@ It is **not** an installed package — you `source("ecaplots.R")` and call the f
 
 Partners reached their weighted/matched analyses by different routes (`MatchIt`/`MatchThem`, `WeightIt`, or hand-rolled PS + IPTW-ATT weights) and hold the results in different shapes (a `MatchThem` object, a stacked multiply-imputed data frame, or a survival table exported from SAS). This script converts any of those into two small **canonical structures** and renders identical, spec-compliant figures from them:
 
-- balance is always computed with **cobalt** (same standardization for everyone);
+- balance is computed with **cobalt** (same standardization for everyone), except for SAS partners who supply their own SMDs (see the SAS note below);
 - the ECA survival curve is always **pooled across the 5 imputations with Rubin's rules** on the complementary-log-log scale;
 - image files are always written with the **`ragg`** package (to improve image quality and consistency across different OS environments) at the spec dimensions.
 
@@ -65,6 +65,7 @@ These are not always checked by the code. Getting one wrong can give a plausible
   - The treatment / arm variable is 0/1 with **1 = RESOLVE trial control** (the focal group) and 0 = external comparator.
   - The estimand is ATT, and SMDs are standardized by the trial-control SD (`s_d_denom = "treated"`). If you code `1 = ECA`, the balance statistics use the wrong standardization and no error is raised.
   - For `MatchThem` objects, the treatment in your PS formula must follow the same coding.
+- **Binary covariates** are summarized as standardized mean differences by default (`binary = "std"` in `as_eca_balance()`). `binary = "raw"` uses raw differences in proportions instead; the x-axis label stays "Absolute standardized mean difference" either way.
 - **Weights**
   - ATT weights: every trial-control subject has weight 1.
   - For IPTW-ATT, comparator weights are `ps / (1 - ps)`, with `ps` = `P(trial control | covariates)`.
@@ -93,7 +94,11 @@ A binary variable always gets one row, because its \|SMD\| is the same for eithe
 
 For binary Age, Sex and performance status, the code fixes the row: Age **≤65**, Sex **Male**, ECOG **0**, Karnofsky **70-80**. `levels` can relabel these rows but cannot pick the other level. If the fixed level can't be recognized from the level text (e.g. a 0/1 age with no labels), a fallback is used with a warning.
 
-Race rows are always in a fixed order: alphabetical by display label (e.g., Asian, Black, White), then any "Other..." level, then any "Unknown"/"Missing" level. `levels` can select and relabel race levels but not reorder them.
+Race rows are always in a fixed order: the default order described below, by display label (alphabetical for text labels, e.g., Asian, Black, White), then any "Other..." level, then any "Unknown"/"Missing" level. `levels` can select and relabel race levels but not reorder them.
+
+Prior cancer treatment rows (one multi-level variable) are also in a fixed order: the default order described below, by display label, then "None", then "Not documented".
+
+For other categorical covariates, rows follow your `levels` entry, else the factor level order, else a default order: numeric levels in numeric order (so `1`, `2`, `>2`; `≤49`, `50-64`, …, `85+`), then other levels alphabetically, then "Unknown"/"Missing"-type levels.
 
 The performance status header names the scale you used: **Baseline ECOG performance status** or **Baseline Karnofsky performance status**. It is detected from the level text (values ≥10, or "Karnofsky"/"KPS", mean Karnofsky; values 0-5, or "ECOG", mean ECOG), then from the variable name. If it can't be detected you get a combined label and a warning; set it explicitly with `ecog_karnofsky = list(variable = "...", scale = "Karnofsky")`.
 
@@ -125,6 +130,8 @@ A spec-specified covariate may be recorded in only one arm. The functions work u
 
 **SAS partners:** export one row per subject per imputation (with the weight, the imputation id and, for matching, the match id) and let this script compute balance and pool survival. That is path (a) in the SAS example, which also covers reading `.sas7bdat` formats and SAS missing values.
 
+- For the Love plot you can instead use the SMDs you already computed in SAS, per imputation, with `as_eca_precomputed_balance()` (path (c)). They are plotted as SAS calculated them, so you don't need to change your SAS approach, but they may be standardized differently from partners whose balance is computed here. Covariates completely missing in one arm can't be detected from SMDs, so leave them out of the table.
+
 - Importing a survival curve already pooled in SAS (path (b)) is a last resort, because SAS's weighted KM intervals don't match the robust (for IPTW-ATT) or cluster-robust (for matching), Rubin's-rules-pooled intervals computed here unless you reproduce that method exactly in SAS beforehand.
 
 ## Fonts
@@ -152,6 +159,7 @@ Email the two PNGs, one Love plot and one KM curve, to FoCR.
 | `eca_covariate_spec()` | the fixed 10-covariate spec order/labels |
 | `eca_mapping_template()` / `validate_eca_mapping()` | build & check your name mapping |
 | `as_eca_balance()` | any input → canonical balance table (via cobalt) |
+| `as_eca_precomputed_balance()` | SMDs computed elsewhere (e.g. SAS) → canonical balance table |
 | `eca_love_plot()` | the Love plot |
 | `as_eca_survival()` / `as_eca_pooled_survival()` | any input → canonical survival |
 | `eca_pool_survival()` | Rubin's-rules pooling across imputations |
