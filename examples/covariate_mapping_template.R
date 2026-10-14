@@ -70,7 +70,8 @@ my_mapping <- list(
     )
   ),
 
-  # Race rows are always shown alphabetically, with "Other..." then
+  # Race rows are always shown in the default order (alphabetical for text
+  # labels; see README), with "Other..." then
   # "Unknown"/"Missing" last, whatever order `levels` lists them in.
   race = list(
     variable = "race",
@@ -135,6 +136,8 @@ my_mapping <- list(
   #       ordered as given. Values may be Yes/No, 0/1 or TRUE/FALSE.
   # Omit modalities you don't have; don't add ones that aren't captured.
   # `indicators` works for any categorical concept, not just this one.
+  # With (a), rows are shown in the default order (see README), then "None",
+  # then "Not documented" last, whatever order `levels` lists them in.
   prior_cancer_treatment = list(
     variable = "prior_cancer_treatment",
     levels = c(
@@ -142,7 +145,7 @@ my_mapping <- list(
       "Radiation" = "Radiation",
       "Systemic therapy" = "Systemic therapy",
       "None" = "None",
-      "Unknown" = "Unknown"
+      "Not documented" = "Not documented"
     )
   )
 )
