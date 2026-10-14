@@ -11,9 +11,11 @@
 #       and the confidence band comes out too narrow.
 #   (b) LAST RESORT: survival already pooled in SAS. Only if subject-level
 #       export is impossible. See the requirements in section (b).
+#   (c) Love plot from the SMDs you already computed in SAS, used as they
+#       are. See section (c).
 #
 # NOT runnable as-is: a template referencing objects/files from YOUR analysis:
-#   "eca_subject_level.sas7bdat", "formats.sas7bcat", `pooled_tbl`.
+#   "eca_subject_level.sas7bdat", "formats.sas7bcat", `pooled_tbl`, `sas_smd`.
 # Run from eca_standard_plots/ (or adjust the source() path), substitute your
 # objects, and edit the column names. Reading .sas7bdat needs `haven`
 # (installed by setup/install_pinned.R).
@@ -126,6 +128,46 @@ eca_save_plot(eca_km_curve(surv), "km_sas.png", type = "km")
 #                                  time_unit = "days")
 # eca_save_plot(eca_km_curve(pooled), "km_sas_pooled.png", type = "km")
 
-# NOTE: the Love plot always needs subject-level covariates to compute balance;
-# there is no "pre-pooled balance" shortcut. Use path (a) for the Love plot
-# even if survival came pre-pooled.
+# ---------------------------------------------------------------------------
+# (c) Love plot from SMDs computed in SAS
+# ---------------------------------------------------------------------------
+# If you already have standardized mean differences from SAS (e.g. PROC
+# PSMATCH's ASSESS statement, or your own macro), use them AS THEY ARE: you
+# do not need to change how SAS calculates them. Compute them within each
+# imputation, before (unadjusted) and after (adjusted) matching/weighting.
+#
+# `smd_tbl` needs one row per variable (and level) per imputation:
+#   variable    your variable name, as in your mapping
+#   level       the category level for categorical variables; empty/NA for
+#               continuous variables (and for 0/1 variables you map with
+#               `indicators`). A 0/1 or categorical version of age or a
+#               time to index needs its level on each row (e.g. "0", "1").
+#   unadjusted  SMD before matching/weighting (the sign doesn't matter)
+#   adjusted    SMD after matching/weighting
+#   imp         the imputation id (omit if you have no imputations)
+#
+# For a binary variable, give both levels, or just the one SAS reported. If
+# only one, list both levels in your mapping's `levels` entry (e.g.
+# sex = list(variable = "sex", levels = c(Female = "Female", Male = "Male")))
+# so the plot can name the spec level (Age <=65, Sex Male, ECOG 0).
+#
+# Covariates completely missing in one arm can't be detected from SMDs:
+# leave them out of `smd_tbl`.
+#
+# smd_tbl <- data.frame(
+#   variable   = sas_smd$Variable,     # your SAS output's column names
+#   level      = sas_smd$Level,
+#   unadjusted = sas_smd$StdDiff_All,
+#   adjusted   = sas_smd$StdDiff_Weighted,
+#   imp        = sas_smd$`_Imputation_`
+# )
+# bal_sas <- as_eca_precomputed_balance(smd_tbl, mapping = mapping)
+# eca_save_plot(eca_love_plot(bal_sas), "love_sas_smd.png", type = "love")
+#
+# For reference only (matching it is NOT currently required): the R routes
+# compute SMDs with cobalt, dividing by the unweighted SD in the trial control
+# arm (arm = 1) for both unadjusted and adjusted SMDs:
+#   continuous:  (mean_1 - mean_0) / sd_1
+#   binary:      (p_1 - p_0) / sqrt(p_1 * (1 - p_1))
+# with weighted arm-0 means/proportions for the adjusted SMDs. Each level of a
+# categorical variable is its own 0/1 variable.
