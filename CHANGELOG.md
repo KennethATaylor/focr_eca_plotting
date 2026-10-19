@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-19
+
+- Committed updates to `ecaplots.R` that were left uncommitted by accident during the `2026-10-19` update
+
 ## 2026-10-14
 
 ### New
