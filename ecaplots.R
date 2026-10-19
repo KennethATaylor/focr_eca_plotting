@@ -357,9 +357,9 @@ eca_setup_font <- function(
 #' each carrying a point). `binary_level`, where present, is a regex (perl,
 #' case-insensitive) naming the level the spec shows when the covariate is
 #' binary: Age <=65, Sex Male, ECOG 0 / Karnofsky 70-80. `last_levels`, where
-#' present, fixes the level order: rows sorted alphabetically by display label,
-#' except those matching each regex (case-insensitive), which go last in the
-#' order given. This overrides the order of the mapping's `levels`. The performance
+#' present, fixes the level order: rows in the default order of
+#' [.eca_sort_levels()] by display label, except those matching each regex
+#' (case-insensitive), which go last in the order given. This overrides the order of the mapping's `levels`. The performance
 #' status label is a fallback: the plot names the scale the partner used
 #' (see [.eca_performance_label()]).
 #'
@@ -415,7 +415,8 @@ eca_covariate_spec <- function() {
     list(
       key = "prior_cancer_treatment",
       label = "Prior cancer treatment",
-      type = "categorical"
+      type = "categorical",
+      last_levels = c("^\\s*none\\b", "not\\s+documented")
     )
   )
 }
@@ -660,6 +661,9 @@ eca_theme <- function(base_family = eca_font_family(), base_size = 12) {
 #' @param s_d_denom Standardization denominator passed to cobalt. Default
 #'   `"treated"` (appropriate for an ATT estimand). Always passed explicitly,
 #'   overriding what cobalt would infer from a matchit/weightit object.
+#' @param binary How cobalt summarizes binary covariates: `"std"` (default,
+#'   standardized mean differences, as the spec expects) or `"raw"` (raw
+#'   differences in proportions). The x-axis label is the spec's either way.
 #' @param colors Length-2 unnamed vector for the unadjusted then adjusted point
 #'   series. Defaults to the spec colors (`#E87D72`, `#56BCC2`).
 #' @param missing_values Values that, like `NA`, mean "not recorded". A mapped
@@ -671,10 +675,12 @@ eca_theme <- function(base_family = eca_font_family(), base_size = 12) {
 #' @return An `eca_balance` object: a list with `plot` (the base `cobalt`
 #'   love.plot ggplot), `mapping` (the normalized covariate mapping, with
 #'   dropped covariates set to `NA`), `levels_observed` (levels of each mapped
-#'   categorical found in the data) and `missing_in_arm` (dropped covariates
-#'   and the arm(s) where they are completely missing).
+#'   categorical found in the data), `missing_in_arm` (dropped covariates
+#'   and the arm(s) where they are completely missing), `binary` and
+#'   `source` (`"cobalt"`; see [as_eca_precomputed_balance()]).
 #'   Categorical rows are ordered by the mapping's `levels` entry if given,
-#'   else by factor level order, else alphabetically.
+#'   else by factor level order, else numeric levels in numeric order, then
+#'   other levels alphabetically, then unknown/missing levels.
 #' @export
 as_eca_balance <- function(
   x,
@@ -684,6 +690,7 @@ as_eca_balance <- function(
   weights = NULL,
   imp = NULL,
   s_d_denom = "treated",
+  binary = c("std", "raw"),
   colors = c("#E87D72", "#56BCC2"),
   missing_values = c(
     "Unknown",
@@ -694,6 +701,7 @@ as_eca_balance <- function(
   ),
   ...
 ) {
+  binary <- match.arg(binary)
   norm_map <- validate_eca_mapping(mapping)
   missing_in_arm <- .eca_missing_in_arm(x, norm_map, treat, missing_values)
   if (length(missing_in_arm)) {
@@ -724,6 +732,7 @@ as_eca_balance <- function(
     imp = imp,
     norm_map = norm_map,
     s_d_denom = s_d_denom,
+    binary = binary,
     colors = colors,
     ...
   )
@@ -732,7 +741,306 @@ as_eca_balance <- function(
       plot = lp,
       mapping = norm_map,
       levels_observed = .eca_observed_levels(x, norm_map),
-      missing_in_arm = missing_in_arm
+      missing_in_arm = missing_in_arm,
+      binary = binary,
+      source = "cobalt"
+    ),
+    class = "eca_balance"
+  )
+}
+
+#' Build a canonical balance object from precomputed (e.g. SAS) SMDs
+#'
+#' For partners whose balance statistics were computed outside R, typically in
+#' SAS. The SMDs are plotted **as supplied**: this function does not
+#' recompute or check their standardization, so they may differ from the
+#' cobalt-computed values of [as_eca_balance()]. Absolute values are taken,
+#' and with an `imp` column each row shows the mean across imputations plus
+#' the min-max range, as for the other routes. The result goes to
+#' [eca_love_plot()] like any other `eca_balance` object.
+#'
+#' `df` has one row per variable (and level) per imputation, with columns:
+#' * `variable` -- the variable name, as used in `mapping`;
+#' * `level` -- the category level for categorical rows; `NA` or `""` for
+#'   continuous rows, and for 0/1 variables mapped as `indicators`;
+#' * `unadjusted`, `adjusted` -- the SMDs before and after matching/weighting;
+#' * `imp` (optional) -- the imputation id.
+#'
+#' A binary variable may give both levels or only one. With both, the row for
+#' the level the Love plot names (Age <=65, Sex Male, ECOG 0, otherwise the
+#' level chosen as for [as_eca_balance()]) is plotted. With only one, list
+#' both levels in the mapping's `levels` entry so the variable is recognised
+#' as binary and the spec level can be named; otherwise the level is shown
+#' as given (with a warning if it isn't the spec level). A categorical
+#' version of age or a time to index (e.g. 0/1 age) must give a `level` on
+#' each row. Level rows are ordered as for [as_eca_balance()]: the mapping's
+#' `levels`, else factor level order of `df$level`, else sorted. Rows for
+#' unmapped variables are not plotted.
+#'
+#' Covariates completely missing in one arm can't be detected from SMDs:
+#' leave them out of `df`.
+#'
+#' @param df A data frame as described above.
+#' @param mapping Partner covariate mapping (see [eca_mapping_template()]).
+#' @param colors Length-2 unnamed vector for the unadjusted then adjusted point
+#'   series. Defaults to the spec colors (`#E87D72`, `#56BCC2`).
+#' @return An `eca_balance` object (see [as_eca_balance()]) with
+#'   `source = "precomputed"` and `binary = NA`.
+#' @export
+as_eca_precomputed_balance <- function(
+  df,
+  mapping,
+  colors = c("#E87D72", "#56BCC2")
+) {
+  norm_map <- validate_eca_mapping(mapping)
+  if (!is.data.frame(df)) {
+    cli::cli_abort("{.arg df} must be a data frame, not {.cls {class(df)}}.")
+  }
+  df <- as.data.frame(df)
+  need <- c("variable", "level", "unadjusted", "adjusted")
+  missing_cols <- setdiff(need, names(df))
+  if (length(missing_cols)) {
+    cli::cli_abort(c(
+      "{.arg df} is missing column{?s} {.val {missing_cols}}.",
+      "i" = "Required: {.val {need}}; optional: {.val imp}. R column names are case-sensitive."
+    ))
+  }
+
+  variable <- trimws(as.character(df$variable))
+  if (anyNA(variable) || any(!nzchar(variable))) {
+    cli::cli_abort("{.code variable} must not be missing or blank.")
+  }
+  level <- trimws(as.character(df$level))
+  level[!is.na(level) & !nzchar(level)] <- NA
+  for (col in c("unadjusted", "adjusted")) {
+    if (!is.numeric(df[[col]]) || anyNA(df[[col]])) {
+      cli::cli_abort(c(
+        "{.code {col}} must be numeric with no missing values.",
+        "i" = "SAS missing numbers read from CSV as {.val .}: use {.code read.csv(na.strings = c(\"\", \".\"))} and check which rows are missing."
+      ))
+    }
+  }
+  imp <- if ("imp" %in% names(df)) df$imp else rep(1L, nrow(df))
+  if (anyNA(imp)) {
+    cli::cli_abort("{.code imp} must not be missing.")
+  }
+
+  mixed <- unique(variable[
+    variable %in% variable[is.na(level)] & variable %in% variable[!is.na(level)]
+  ])
+  if (length(mixed)) {
+    cli::cli_abort(c(
+      "Variable{?s} {.val {mixed}} {?has/have} rows both with and without a {.code level}.",
+      "i" = "Continuous rows have no level; each categorical row names its level."
+    ))
+  }
+  key <- ifelse(is.na(level), variable, paste0(variable, "_", level))
+  dup <- duplicated(data.frame(variable, level, imp))
+  if (any(dup)) {
+    cli::cli_abort(
+      "Duplicate rows for {.val {unique(key[dup])}}: each variable/level appears once per imputation."
+    )
+  }
+  pairs <- unique(data.frame(variable, level, key))
+  clash <- unique(pairs$key[duplicated(pairs$key)])
+  if (length(clash)) {
+    who <- pairs[pairs$key %in% clash, ]
+    desc <- paste0(who$variable, " / ", ifelse(is.na(who$level), "(no level)", who$level))
+    cli::cli_abort(c(
+      "Variable/level pairs {.val {desc}} both give the row name {.val {clash}}.",
+      "i" = "Rows are named {.code <variable>_<level>}; rename a variable or level so they differ."
+    ))
+  }
+  n_imp <- length(unique(imp))
+  counts <- table(key)
+  incomplete <- names(counts)[counts != n_imp]
+  if (length(incomplete)) {
+    cli::cli_abort(c(
+      "Row{?s} {.val {incomplete}} {?is/are} not present in every imputation.",
+      "i" = "{.arg df} has {n_imp} imputation{?s}; each variable/level needs a row in each."
+    ))
+  }
+
+  # The layout needs each categorical variable's levels, ordered as for
+  # as_eca_balance(): factor level order, else sorted.
+  vars <- unique(variable)
+  levels_observed <- list()
+  for (v in vars[vars %in% variable[!is.na(level)]]) {
+    present <- unique(level[variable == v & !is.na(level)])
+    levels_observed[[v]] <- if (is.factor(df$level)) {
+      intersect(trimws(levels(df$level)), present)
+    } else {
+      .eca_sort_levels(present)
+    }
+  }
+  attr(levels_observed, "located") <- vars
+
+  spec <- eca_covariate_spec()
+  keep <- rep(TRUE, nrow(df))
+  disagree <- character(0)
+  lone <- character(0)
+  for (entry in spec) {
+    m <- norm_map[[entry$key]]
+    if (is.null(m) || all(is.na(m$variable))) {
+      next
+    }
+    if (!isTRUE(m$indicators) && !identical(entry$type, "continuous")) {
+      bare <- intersect(m$variable, variable[is.na(level)])
+      if (length(bare)) {
+        cli::cli_abort(c(
+          "Categorical covariate {.val {bare}} has rows with no {.code level}.",
+          "i" = "Give each row its level (e.g. {.val 1} or {.val Male}), or map yes/no variables with {.code indicators}."
+        ))
+      }
+    }
+    level_map <- if (!isTRUE(m$indicators)) m$levels
+    if (
+      identical(entry$type, "continuous") &&
+        !is.null(level_map) &&
+        all(m$variable %in% variable) &&
+        !any(m$variable %in% names(levels_observed))
+    ) {
+      cli::cli_abort(c(
+        "{.val {entry$key}} has a {.code levels} entry, but {.val {intersect(m$variable, variable)}} {?has/have} no rows with a {.code level}.",
+        "i" = "For a categorical (e.g. 0/1) version, give each row its level (e.g. {.val 0} and {.val 1})."
+      ))
+    }
+    for (v in intersect(m$variable, names(levels_observed))) {
+      known <- levels_observed[[v]]
+      # One level reported: the mapping's two levels make it a binary.
+      if (
+        length(known) == 1L &&
+          length(level_map) == 2L &&
+          known %in% names(level_map)
+      ) {
+        levels_observed[[v]] <- names(level_map)
+        next
+      }
+      if (length(known) == 1L && !is.null(entry$binary_level)) {
+        disp <- if (known %in% names(level_map)) level_map[[known]] else known
+        if (
+          !grepl(entry$binary_level, known, perl = TRUE, ignore.case = TRUE) &&
+            !grepl(entry$binary_level, disp, perl = TRUE, ignore.case = TRUE)
+        ) {
+          lone <- c(lone, paste0(v, ": ", disp, " (spec: ", entry$binary_desc, ")"))
+        }
+      }
+      # A binary has two levels, and a `levels` entry naming more means some
+      # levels are missing from `df`, not that the variable is binary.
+      if (length(known) != 2L || length(level_map) > 2L) {
+        next
+      }
+      # The level cobalt would report: the last factor level, which for
+      # character data is the last in sort() order.
+      reported <- if (is.factor(df$level)) known[[2]] else sort(known)[[2]]
+      shown <- .eca_binary_level(known, level_map, entry$binary_level, reported)
+      if (is.na(shown)) {
+        shown <- .eca_binary_level(known, level_map, reported = reported)
+      }
+      rows <- variable == v
+      a <- rows & level %in% shown
+      b <- rows & !level %in% shown
+      ord <- function(i) order(imp[i])
+      ia <- which(a)[ord(a)]
+      ib <- which(b)[ord(b)]
+      gap <- max(
+        abs(abs(df$unadjusted[ia]) - abs(df$unadjusted[ib])),
+        abs(abs(df$adjusted[ia]) - abs(df$adjusted[ib]))
+      )
+      if (gap > 1e-6) {
+        disagree <- c(disagree, paste0(v, ": ", shown))
+      }
+      keep[b] <- FALSE
+    }
+  }
+  if (length(lone)) {
+    cli::cli_warn(c(
+      "!" = "Only one level was supplied for binary covariate{?s} {.val {lone}}, and it isn't the level the spec names; it is shown as supplied.",
+      "i" = "Add both levels to the mapping's {.code levels} entry (e.g. {.code levels = c(Female = \"Female\", Male = \"Male\")}) so the spec level is named; a binary's two levels have the same |SMD|."
+    ))
+  }
+  if (length(disagree)) {
+    cli::cli_inform(c(
+      "i" = "The two levels of binary covariate{?s} {.val {disagree}} have different |SMD|s; the named level's value is plotted."
+    ))
+  }
+
+  long <- data.frame(
+    var = rep(key[keep], 2L),
+    Sample = factor(
+      rep(c("Unadjusted", "Adjusted"), each = sum(keep)),
+      levels = c("Unadjusted", "Adjusted")
+    ),
+    value = abs(c(df$unadjusted[keep], df$adjusted[keep]))
+  )
+  grp <- interaction(long$var, long$Sample, drop = TRUE, sep = "\u001f")
+  first <- !duplicated(grp)
+  dat <- long[first, c("var", "Sample")]
+  dat$min.stat <- as.vector(tapply(long$value, grp, min)[as.character(grp[first])])
+  dat$max.stat <- as.vector(tapply(long$value, grp, max)[as.character(grp[first])])
+  dat$mean.stat <- as.vector(tapply(long$value, grp, mean)[as.character(grp[first])])
+  dat$stat <- dat$mean.stat
+  dat$var <- factor(dat$var, levels = unique(key[keep]))
+  rownames(dat) <- NULL
+  if (n_imp == 1L) {
+    dat <- dat[c("var", "Sample", "stat")]
+  }
+
+  # Same geoms and settings as cobalt::love.plot(), so the reshaped plot
+  # matches the other routes.
+  p <- ggplot2::ggplot(
+    dat,
+    ggplot2::aes(x = .data$stat, y = .data$var, group = .data$Sample)
+  ) +
+    ggplot2::geom_vline(xintercept = 0, linetype = 1, colour = "gray5")
+  if (n_imp > 1L) {
+    dodge <- ggplot2::position_dodge(0.5)
+    p <- p +
+      ggplot2::geom_linerange(
+        ggplot2::aes(
+          xmin = .data$min.stat,
+          xmax = .data$max.stat,
+          colour = .data$Sample
+        ),
+        linewidth = 0.8,
+        orientation = "y",
+        position = dodge,
+        na.rm = TRUE,
+        show.legend = FALSE
+      ) +
+      ggplot2::geom_point(
+        ggplot2::aes(x = .data$mean.stat, colour = .data$Sample),
+        shape = "circle",
+        fill = "white",
+        size = 3,
+        stroke = 0,
+        position = dodge,
+        na.rm = TRUE
+      )
+  } else {
+    p <- p +
+      ggplot2::geom_point(
+        ggplot2::aes(colour = .data$Sample),
+        shape = "circle",
+        fill = "white",
+        size = 3,
+        stroke = 0,
+        na.rm = TRUE
+      )
+  }
+  p <- p +
+    ggplot2::scale_colour_manual(
+      values = stats::setNames(colors[1:2], levels(dat$Sample))
+    )
+
+  structure(
+    list(
+      plot = p,
+      mapping = norm_map,
+      levels_observed = levels_observed,
+      missing_in_arm = list(),
+      binary = NA_character_,
+      source = "precomputed"
     ),
     class = "eca_balance"
   )
@@ -834,7 +1142,7 @@ as_eca_balance <- function(
       } else if (is.numeric(col)) {
         as.character(sort(unique(col[!is.na(col)])))
       } else {
-        sort(present)
+        .eca_sort_levels(present)
       }
     }
   }
@@ -858,12 +1166,13 @@ as_eca_balance <- function(
   imp,
   norm_map,
   s_d_denom,
+  binary,
   colors,
   ...
 ) {
   base_args <- list(
     stats = "mean.diffs",
-    binary = "std",
+    binary = binary,
     continuous = "std",
     abs = TRUE,
     un = TRUE,
@@ -943,15 +1252,18 @@ as_eca_balance <- function(
 #' unstandardized continuous variables. Our calls always standardize, and the
 #' row is often one we drop anyway (e.g. a transformed or interaction PS term), so the
 #' hint misleads. [eca_love_plot()] warns instead if a plotted row exceeds 5.
+#' With `binary = "raw"`, cobalt's "standardized and raw mean differences ...
+#' in the same plot" warning is muffled too: the spec fixes the axis label.
 #' @keywords internal
 .eca_cobalt_love_plot <- function(...) {
   withCallingHandlers(
     cobalt::love.plot(...),
     warning = function(w) {
       if (
+        # cobalt wraps messages at the console width; collapse line breaks.
         grepl(
-          "large mean differences detected",
-          conditionMessage(w),
+          "large mean differences detected|raw mean differences are present in the same",
+          gsub("\\s+", " ", conditionMessage(w)),
           ignore.case = TRUE
         )
       ) {
@@ -1040,11 +1352,11 @@ as_eca_balance <- function(
       # Claim only rows for real levels (in the data's level order).
       raw_levels <- known[paste0(prefix, known) %in% avail]
     } else {
-      raw_levels <- sort(unique(sub(
+      raw_levels <- .eca_sort_levels(sub(
         paste0("^", .eca_escape(prefix)),
         "",
         .eca_prefix_rows(var, avail, all_vars)
-      )))
+      ))
     }
     exact <- if (var %in% avail) var else character(0)
     if (!length(raw_levels) && !length(exact)) {
@@ -1059,10 +1371,11 @@ as_eca_balance <- function(
     # that row with the level chosen by .eca_binary_level().
     if (length(known) == 2L && length(raw_levels) + length(exact) == 1L) {
       row <- if (length(exact)) var else paste0(prefix, raw_levels)
-      shown <- .eca_binary_level(known, level_map, prefer)
+      reported <- if (!length(exact)) raw_levels
+      shown <- .eca_binary_level(known, level_map, prefer, reported)
       if (!is.null(prefer) && is.na(shown)) {
         unmatched <<- c(unmatched, paste0(label, " (", prefer_desc, ")"))
-        shown <- .eca_binary_level(known, level_map)
+        shown <- .eca_binary_level(known, level_map, reported = reported)
       }
       if (!is.null(level_map) && !shown %in% names(level_map)) {
         unlabelled <<- c(unlabelled, paste0(label, ": ", shown))
@@ -1097,7 +1410,7 @@ as_eca_balance <- function(
       for (i in rev(seq_along(last_levels))) {
         tier[grepl(last_levels[[i]], out, ignore.case = TRUE, perl = TRUE)] <- i
       }
-      out <- out[order(tier, tolower(out))]
+      out <- out[order(tier, match(out, .eca_sort_levels(out)))]
     }
     out
   }
@@ -1385,10 +1698,16 @@ as_eca_balance <- function(
 #' raw value or `levels` label matches it, or `NA` if not exactly one does.
 #' Otherwise, in order: the level if the mapping's `levels` lists exactly one
 #' of the two; else a "positive" level (Yes / 1 / TRUE / Present); else the
-#' last level (the one cobalt reports).
-#' @param known The two observed levels, in data order.
+#' level cobalt reports (`reported`), or the last level if that's unknown.
+#' @param known The two observed levels, in display order.
+#' @param reported The level of cobalt's `var_<level>` row, if any.
 #' @keywords internal
-.eca_binary_level <- function(known, level_map = NULL, prefer = NULL) {
+.eca_binary_level <- function(
+  known,
+  level_map = NULL,
+  prefer = NULL,
+  reported = NULL
+) {
   if (!is.null(prefer)) {
     disp <- ifelse(known %in% names(level_map), level_map[known], known)
     hit <- grepl(prefer, known, perl = TRUE, ignore.case = TRUE) |
@@ -1403,7 +1722,42 @@ as_eca_balance <- function(
   if (length(pos) == 1L) {
     return(pos)
   }
+  if (length(reported) == 1L && reported %in% known) {
+    return(reported)
+  }
   known[[2]]
+}
+
+#' Default order for category levels with no `levels` entry or factor order
+#'
+#' Numeric-looking levels first, by their leading number: `<`/`\u2264` before
+#' the bare number, `>`/`\u2265` or a trailing `+` after it (so
+#' `1, 2, >2` and `\u226449, 50-64, ..., 85+`). Then other levels
+#' alphabetically, then unknown/missing-type levels.
+#' @keywords internal
+.eca_sort_levels <- function(x) {
+  x <- unique(as.character(x))
+  low <- tolower(trimws(x))
+  num_re <- "^(<=|>=|<|>|\u2264|\u2265)?\\s*(\\d+(\\.\\d+)?)"
+  is_num <- grepl(num_re, low, perl = TRUE)
+  num <- suppressWarnings(as.numeric(sub(paste0(num_re, ".*$"), "\\2", low, perl = TRUE)))
+  num[!is_num] <- NA
+  cmp <- sub(paste0(num_re, ".*$"), "\\1", low, perl = TRUE)
+  side <- ifelse(
+    !is_num,
+    0L,
+    ifelse(
+      cmp %in% c("<", "<=", "\u2264"),
+      -1L,
+      ifelse(cmp %in% c(">", ">=", "\u2265") | grepl("\\+\\s*$", low), 1L, 0L)
+    )
+  )
+  group <- ifelse(
+    grepl("unknown|missing|not documented|not reported", low),
+    3L,
+    ifelse(is_num, 1L, 2L)
+  )
+  x[order(group, num, side, low, method = "radix")]
 }
 
 #' Regex-escape a string
@@ -1529,9 +1883,19 @@ eca_love_plot <- function(
   big <- apply(abs(as.matrix(base_plot$data[stat_cols])) > 5, 1, any)
   big_rows <- unique(as.character(base_plot$data[[y_var]][big %in% TRUE]))
   if (length(big_rows)) {
+    origin <- if (identical(x$source, "precomputed")) {
+      "These are the supplied (precomputed) values"
+    } else if (identical(x$binary, "raw")) {
+      "These are cobalt's mean differences (standardized for continuous rows, raw for binary rows)"
+    } else {
+      "These are standardized SMDs from cobalt"
+    }
     cli::cli_warn(c(
-      "!" = "Plotted standardized mean difference{?s} above 5 for {.val {big_rows}}.",
-      "i" = "These are standardized SMDs from cobalt, not a calculation error; values this large usually mean a rare level or near-separation between arms. Worth checking the data."
+      "!" = "Plotted mean difference{?s} above 5 for {.val {big_rows}}.",
+      "i" = paste0(
+        origin,
+        ", not a calculation error by this script; values this large usually mean a rare level or near-separation between arms. Worth checking the data."
+      )
     ))
   }
 
@@ -1569,6 +1933,14 @@ eca_love_plot <- function(
     c(Unadjusted = colors[[1]], Adjusted = colors[[2]])
   }
 
+  y_labels <- ggtext::element_markdown(
+    family = base_family,
+    size = base_size,
+    hjust = 1,
+    # Small breathing room between right-aligned labels and the axis.
+    margin = ggplot2::margin(r = 6)
+  )
+
   suppressMessages(
     base_plot +
       ggplot2::scale_color_manual(values = sample_colors) +
@@ -1596,13 +1968,10 @@ eca_love_plot <- function(
         base_size
       ) +
       ggplot2::theme(
-        axis.text.y = ggtext::element_markdown(
-          family = base_family,
-          size = base_size,
-          hjust = 1,
-          # Small breathing room between right-aligned labels and the axis.
-          margin = ggplot2::margin(r = 6)
-        ),
+        axis.text.y = y_labels,
+        # ggplot2 >= 4.0's complete themes set a plain `axis.text.y.left`,
+        # which would override `axis.text.y` and print the markdown literally.
+        axis.text.y.left = y_labels,
         # No y tick marks -- the row labels themselves position each covariate.
         axis.ticks.y = ggplot2::element_blank(),
         axis.line.y = ggplot2::element_line(colour = "black")
